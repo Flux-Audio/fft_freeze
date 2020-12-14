@@ -13,6 +13,8 @@ use rustfft::FFT;
 use rustfft::num_complex::Complex;
 use rustfft::num_traits::Zero;
 
+use itertools::izip;
+
 mod compute;
 
 const SIZE: usize = 4096;
@@ -24,6 +26,10 @@ struct Effect {
     // meta variables
     sr: f32,
     scale: f64,     // scaling factor for sr independence of integrals
+
+    // FFT engines
+    fft: Radix4<f32>,
+    ifft: Radix4<f32>,
 
     // FFT variables
     xl: Vec<Complex<f32>>,
@@ -52,6 +58,12 @@ impl Default for Effect {
             // meta variables
             sr: 44100.0,
             scale: 1.0,
+
+            // FFT engines
+            fft: Radix4::new(SIZE, false),
+            ifft: Radix4::new(SIZE, true),
+
+            // FFT variables
             xl: Vec::new(),
             xr: Vec::new(),
             env: VecDeque::from(vec![0.0; SIZE]),
@@ -130,46 +142,45 @@ impl Plugin for Effect {
 
             // if buffer is full, perform FFT
             if self.count >= SIZE{
-                let fft = Radix4::new(SIZE, false);
-                fft.process(&mut self.xl, &mut self.fft_l);
-                fft.process(&mut self.xr, &mut self.fft_r);
-                //self.fft_l.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
-                //self.fft_r.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
+                self.fft.process(&mut self.xl, &mut self.fft_l);
+                self.fft.process(&mut self.xr, &mut self.fft_r);
+
+                // normalize
+                self.fft_l.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
+                self.fft_r.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
+
+                // clean up
                 self.xl.clear();
                 self.xr.clear();
-            }
 
-            // === inverse FFT =================================================
-            // the inverse of the previous buffer is computed
-            if self.count >= SIZE {
-                let ifft = Radix4::new(SIZE, true);
+                // === spectral freeze =========================================
+                for i in 0..SIZE{
+                    self.ifft_l[i] = {
+                        let (x_amp, x_phi) = self.fft_l[i].to_polar();
+                        let (p_amp, p_phi) = self.p_ifft_l[i].to_polar();
+                        let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
+                        let y_phi = x_phi * (1.0 - freeze) + p_phi * freeze;
+                        Complex::from_polar(y_amp, y_phi)
+                    };
+                    self.ifft_r[i] = {
+                        let (x_amp, x_phi) = self.fft_r[i].to_polar();
+                        let (p_amp, p_phi) = self.p_ifft_r[i].to_polar();
+                        let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
+                        let y_phi = x_phi * (1.0 - freeze) + p_phi * freeze;
+                        Complex::from_polar(y_amp, y_phi)
+                    };
+                    self.p_ifft_l[i] = self.ifft_l[i];
+                    self.p_ifft_r[i] = self.ifft_r[i];
+                }
+
+                // === inverse FFT =============================================
                 let mut auxl = vec![Complex::zero(); SIZE];
                 let mut auxr = vec![Complex::zero(); SIZE];
-                ifft.process(&mut self.ifft_l, &mut auxl);
-                ifft.process(&mut self.ifft_r, &mut auxr);
+                self.ifft.process(&mut self.ifft_l, &mut auxl);
+                self.ifft.process(&mut self.ifft_r, &mut auxr);
                 self.yl = VecDeque::from(auxl);
                 self.yr = VecDeque::from(auxr);
-                self.ifft_l.clear();
-                self.ifft_r.clear();
             }
-
-            // === spectral freeze =============================================
-            self.ifft_l[self.count-1] = {
-                let (x_amp, x_phi) = self.fft_l[self.count-1].to_polar();
-                let (p_amp, p_phi) = self.p_ifft_l[self.count-1].to_polar();
-                let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
-                let y_phi = x_phi;
-                Complex::from_polar(y_amp, y_phi)
-            };
-            self.ifft_r[self.count-1] = {
-                let (x_amp, x_phi) = self.fft_r[self.count-1].to_polar();
-                let (p_amp, p_phi) = self.p_ifft_r[self.count-1].to_polar();
-                let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
-                let y_phi = x_phi;
-                Complex::from_polar(y_amp, y_phi)
-            };
-            self.p_ifft_l[self.count-1] = self.ifft_l[self.count-1];
-            self.p_ifft_r[self.count-1] = self.ifft_r[self.count-1];
 
             // === output ======================================================
             *left_out = match self.yl.pop_front(){
