@@ -154,6 +154,8 @@ impl Plugin for Effect {
                 self.xr.clear();
 
                 // === spectral freeze =========================================
+                // TODO: phase should not be average but instead be additive
+                // see this: http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.72.3895&rep=rep1&type=pdf
                 for i in 0..SIZE{
                     self.ifft_l[i] = {
                         let (x_amp, x_phi) = self.fft_l[i].to_polar();
