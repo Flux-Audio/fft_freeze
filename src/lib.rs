@@ -13,11 +13,11 @@ use rustfft::FFT;
 use rustfft::num_complex::Complex;
 use rustfft::num_traits::Zero;
 
-use itertools::izip;
-
 mod compute;
 
-const SIZE: usize = 4096;
+const SIZE: usize = 4096;   // must be of the form 2^k >= 32
+const PADDING: usize = SIZE/32;
+const ACTIVE: usize = SIZE - 2*PADDING;
 
 struct Effect {
     // Store a handle to the plugin's parameter object.
@@ -32,8 +32,10 @@ struct Effect {
     ifft: Radix4<f32>,
 
     // FFT variables
-    xl: Vec<Complex<f32>>,
-    xr: Vec<Complex<f32>>,
+    xl_1: Vec<Complex<f32>>,
+    xr_1: Vec<Complex<f32>>,
+    xl_2: Vec<Complex<f32>>,
+    xr_2: Vec<Complex<f32>>,
     env: VecDeque<f32>,
     fft_l: Vec<Complex<f32>>,
     fft_r: Vec<Complex<f32>>,
@@ -43,7 +45,10 @@ struct Effect {
     ifft_r: Vec<Complex<f32>>,
     yl: VecDeque<Complex<f32>>,
     yr: VecDeque<Complex<f32>>,
-    count: usize,
+    count1: usize,
+    count2: usize,
+    x_1_enable: bool,
+    x_2_enable: bool,
 }
 
 struct EffectParameters {
@@ -64,8 +69,10 @@ impl Default for Effect {
             ifft: Radix4::new(SIZE, true),
 
             // FFT variables
-            xl: Vec::new(),
-            xr: Vec::new(),
+            xl_1: vec![Complex::zero(); PADDING],     // pre-fill padding buffer
+            xr_1: vec![Complex::zero(); PADDING],     // pre-fill padding buffer
+            xl_2: Vec::with_capacity(SIZE),
+            xr_2: Vec::with_capacity(SIZE),
             env: VecDeque::from(vec![0.0; SIZE]),
             fft_l: vec![Complex::zero(); SIZE],
             fft_r: vec![Complex::zero(); SIZE],
@@ -75,7 +82,10 @@ impl Default for Effect {
             p_ifft_r: vec![Complex::zero(); SIZE],
             yl: VecDeque::from(vec![Complex::zero(); SIZE]),
             yr: VecDeque::from(vec![Complex::zero(); SIZE]),
-            count: 0,
+            count1: PADDING,     // pre-filled padding buffer
+            count2: 0,
+            x_1_enable: true,
+            x_2_enable: false,
         }
     }
 }
@@ -134,24 +144,67 @@ impl Plugin for Effect {
 
             // === envelope follower ===========================================
 
-            // === perform FFT on inputs =======================================
-            // load samples into buffers
-            self.xl.push(Complex::new(*left_in, 0.0));
-            self.xr.push(Complex::new(*right_in, 0.0));
-            self.count = self.count%SIZE + 1;
+            // === buffer interlacing ==========================================
+            // the incoming audio is divided into ACTIVE-sized blocks, but each 
+            // block contains an additional PADDING samples at the beginning and
+            // end that overlap with the next block, bringing the total size
+            // of each block to SIZE. This is done to avoid FFT edge artifacts
 
+            // enable correct buffers
+            if self.count1 == ACTIVE{ self.x_2_enable = true; }
+            if self.count2 == ACTIVE{ self.x_1_enable = true; }
+            // invariants:  count1 >= ACTIVE =>  x_2_enable
+            //              count1 <  ACTIVE => !x_2_enable
+            //              count2 >= ACTIVE =>  x_1_enable
+            //              count2 <  ACTIVE => !x_1_enable 
+
+            // load samples into enabled buffers
+            if self.x_1_enable{
+                self.xl_1.push(Complex::new(*left_in, 0.0));
+                self.xr_1.push(Complex::new(*right_in, 0.0));
+                self.count1 += 1;
+            }
+            if self.x_2_enable{
+                self.xl_2.push(Complex::new(*left_in, 0.0));
+                self.xr_2.push(Complex::new(*right_in, 0.0));
+                self.count1 += 2;
+            }
+
+            // disable full buffers & prepare for fft
+            let mut fft_ready = false;
+            let mut xl_fft: Vec<Complex<f32>> = Vec::new();
+            let mut xr_fft: Vec<Complex<f32>> = Vec::new();
+            if self.count1 == SIZE{ 
+                self.x_1_enable = false;
+                xl_fft = self.xl_1.to_vec();
+                xr_fft = self.xr_1.to_vec();
+                self.count1 = 0;
+                fft_ready = true;
+            } else if self.count2 == SIZE{
+                self.x_2_enable = false;
+                xl_fft = self.xl_2.to_vec();
+                xr_fft = self.xr_2.to_vec();
+                self.count2 = 0;
+                fft_ready = true;
+            }
+            // invariants:  !x_1_enable => x_2_enable
+            //              !x_2_enable => x_1_enable
+            //              count1 <= SIZE
+            //              count2 <= SIZE
+
+            // === perform FFT on inputs =======================================
             // if buffer is full, perform FFT
-            if self.count >= SIZE{
-                self.fft.process(&mut self.xl, &mut self.fft_l);
-                self.fft.process(&mut self.xr, &mut self.fft_r);
+            if fft_ready{
+                self.fft.process(&mut xl_fft, &mut self.fft_l);
+                self.fft.process(&mut xr_fft, &mut self.fft_r);
 
                 // normalize
-                self.fft_l.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
-                self.fft_r.iter_mut().for_each(|elem| *elem /= (SIZE as f32));
+                self.fft_l.iter_mut().for_each(|elem| *elem /= SIZE as f32);
+                self.fft_r.iter_mut().for_each(|elem| *elem /= SIZE as f32);
 
                 // clean up
-                self.xl.clear();
-                self.xr.clear();
+                // self.xl.clear();
+                // self.xr.clear();
 
                 // === spectral freeze =========================================
                 for i in 0..SIZE{
@@ -173,13 +226,25 @@ impl Plugin for Effect {
                     self.p_ifft_r[i] = self.ifft_r[i];
                 }
 
-                // === inverse FFT =============================================
+                // === inverse FFT & deinterlacing =============================
+
+                // inverse fft
                 let mut auxl = vec![Complex::zero(); SIZE];
                 let mut auxr = vec![Complex::zero(); SIZE];
                 self.ifft.process(&mut self.ifft_l, &mut auxl);
                 self.ifft.process(&mut self.ifft_r, &mut auxr);
+
+                // convert to deques
                 self.yl = VecDeque::from(auxl);
                 self.yr = VecDeque::from(auxr);
+
+                // discard first and last PADDING samples (deinterlace)
+                for i in 0..PADDING{
+                    self.yl.pop_front();
+                    self.yr.pop_front();
+                    self.yl.pop_back();
+                    self.yr.pop_back();
+                }
             }
 
             // === output ======================================================
