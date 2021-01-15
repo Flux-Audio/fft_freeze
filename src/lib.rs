@@ -8,6 +8,10 @@ use vst::util::AtomicFloat;
 use std::sync::Arc;
 use std::collections::VecDeque;
 
+use rand_xoshiro::rand_core::SeedableRng;
+use rand_xoshiro::Xoshiro256Plus;
+use rand_xoshiro::rand_core::RngCore;
+
 use rustfft::algorithm::Radix4;
 use rustfft::FFT;
 use rustfft::num_complex::Complex;
@@ -15,15 +19,16 @@ use rustfft::num_traits::Zero;
 
 mod compute;
 
-const SIZE: usize = 4096;   // must be of the form 2^k >= 32
-const PADDING: usize = SIZE/32;
-const ACTIVE: usize = SIZE - 2*PADDING;
+const SIZE: usize = 256;   // must be of the form 2^k >= 32
+const L_DIV: f32 = 1.0/ (SIZE as f32);
+const _2_DIV_3: f32 = 2.0/3.0;
 
 struct Effect {
     // Store a handle to the plugin's parameter object.
     params: Arc<EffectParameters>,
 
     // meta variables
+    rng: Xoshiro256Plus,
     sr: f32,
     scale: f64,     // scaling factor for sr independence of integrals
 
@@ -31,28 +36,30 @@ struct Effect {
     fft: Radix4<f32>,
     ifft: Radix4<f32>,
 
+    // other variables
+    env: VecDeque<f32>,         // envelope follower
+
     // FFT variables
-    xl_1: Vec<Complex<f32>>,
-    xr_1: Vec<Complex<f32>>,
-    xl_2: Vec<Complex<f32>>,
-    xr_2: Vec<Complex<f32>>,
-    env: VecDeque<f32>,
-    fft_l: Vec<Complex<f32>>,
-    fft_r: Vec<Complex<f32>>,
-    p_ifft_l: Vec<Complex<f32>>,
-    p_ifft_r: Vec<Complex<f32>>,
-    ifft_l: Vec<Complex<f32>>,
-    ifft_r: Vec<Complex<f32>>,
-    yl: VecDeque<Complex<f32>>,
-    yr: VecDeque<Complex<f32>>,
-    count1: usize,
-    count2: usize,
-    x_1_enable: bool,
-    x_2_enable: bool,
+    // sample counter (counts to SIZE/4)
+    count: usize,
+
+    // time-domain variables
+    xl_samp: VecDeque<Complex<f32>>,
+    xr_samp: VecDeque<Complex<f32>>,
+
+    // frequency-domain variables
+    xl_bins: Vec<Complex<f32>>,
+    xr_bins: Vec<Complex<f32>>,
+    // TODO: do the variables for the freezing thing. Deltas and non-deltas
+
+    // output buffer
+    yl_samp: VecDeque<f32>,
+    yr_samp: VecDeque<f32>,
 }
 
 struct EffectParameters {
     freeze: AtomicFloat,
+    diffuse: AtomicFloat,
 }
 
 impl Default for Effect {
@@ -61,6 +68,7 @@ impl Default for Effect {
             params: Arc::new(EffectParameters::default()),
 
             // meta variables
+            rng: Xoshiro256Plus::seed_from_u64(58249537),
             sr: 44100.0,
             scale: 1.0,
 
@@ -68,24 +76,21 @@ impl Default for Effect {
             fft: Radix4::new(SIZE, false),
             ifft: Radix4::new(SIZE, true),
 
-            // FFT variables
-            xl_1: vec![Complex::zero(); PADDING],     // pre-fill padding buffer
-            xr_1: vec![Complex::zero(); PADDING],     // pre-fill padding buffer
-            xl_2: Vec::with_capacity(SIZE),
-            xr_2: Vec::with_capacity(SIZE),
+            // misc variables
             env: VecDeque::from(vec![0.0; SIZE]),
-            fft_l: vec![Complex::zero(); SIZE],
-            fft_r: vec![Complex::zero(); SIZE],
-            ifft_l: vec![Complex::zero(); SIZE],
-            ifft_r: vec![Complex::zero(); SIZE],
-            p_ifft_l: vec![Complex::zero(); SIZE],
-            p_ifft_r: vec![Complex::zero(); SIZE],
-            yl: VecDeque::from(vec![Complex::zero(); SIZE]),
-            yr: VecDeque::from(vec![Complex::zero(); SIZE]),
-            count1: PADDING,     // pre-filled padding buffer
-            count2: 0,
-            x_1_enable: true,
-            x_2_enable: false,
+
+            // FFT variables
+            count: 0,
+            xl_samp: VecDeque::from(vec![Complex::zero(); SIZE]),     // pre-fill padding buffer
+            xr_samp: VecDeque::from(vec![Complex::zero(); SIZE]),     // pre-fill padding buffer
+            xl_bins: vec![Complex::zero(); SIZE],
+            xr_bins: vec![Complex::zero(); SIZE],
+            xl_bins_in_dly_1: vec![Complex::zero(); SIZE],
+            xr_bins_in_dly_1: vec![Complex::zero(); SIZE],
+            d_xl_bins_out_dly_1: vec![Complex::zero(); SIZE],
+            d_xr_bins_out_dly_1: vec![Complex::zero(); SIZE],
+            yl_samp: VecDeque::from(vec![0.0; SIZE]),
+            yr_samp: VecDeque::from(vec![0.0; SIZE]),
         }
     }
 }
@@ -94,6 +99,7 @@ impl Default for EffectParameters {
     fn default() -> EffectParameters {
         EffectParameters {
             freeze: AtomicFloat::new(0.0),
+            diffuse: AtomicFloat::new(0.0),
         }
     }
 }
@@ -111,7 +117,7 @@ impl Plugin for Effect {
             outputs: 2,
             // This `parameters` bit is important; without it, none of our
             // parameters will be shown!
-            parameters: 1,
+            parameters: 2,
             category: Category::Generator,
             ..Default::default()
         }
@@ -141,121 +147,107 @@ impl Plugin for Effect {
         for ((left_in, right_in), (left_out, right_out)) in stereo_in.zip(stereo_out) {
             // === get params ==================================================
             let freeze = self.params.freeze.get();
+            let diffuse = self.params.diffuse.get();
 
             // === envelope follower ===========================================
 
-            // === buffer interlacing ==========================================
-            // the incoming audio is divided into ACTIVE-sized blocks, but each 
-            // block contains an additional PADDING samples at the beginning and
-            // end that overlap with the next block, bringing the total size
-            // of each block to SIZE. This is done to avoid FFT edge artifacts
-
-            // enable correct buffers
-            if self.count1 == ACTIVE{ self.x_2_enable = true; }
-            if self.count2 == ACTIVE{ self.x_1_enable = true; }
-            // invariants:  count1 >= ACTIVE =>  x_2_enable
-            //              count1 <  ACTIVE => !x_2_enable
-            //              count2 >= ACTIVE =>  x_1_enable
-            //              count2 <  ACTIVE => !x_1_enable 
-
-            // load samples into enabled buffers
-            if self.x_1_enable{
-                self.xl_1.push(Complex::new(*left_in, 0.0));
-                self.xr_1.push(Complex::new(*right_in, 0.0));
-                self.count1 += 1;
-            }
-            if self.x_2_enable{
-                self.xl_2.push(Complex::new(*left_in, 0.0));
-                self.xr_2.push(Complex::new(*right_in, 0.0));
-                self.count1 += 2;
-            }
-
-            // disable full buffers & prepare for fft
-            let mut fft_ready = false;
-            let mut xl_fft: Vec<Complex<f32>> = Vec::new();
-            let mut xr_fft: Vec<Complex<f32>> = Vec::new();
-            if self.count1 == SIZE{ 
-                self.x_1_enable = false;
-                xl_fft = self.xl_1.to_vec();
-                xr_fft = self.xr_1.to_vec();
-                self.count1 = 0;
-                fft_ready = true;
-            } else if self.count2 == SIZE{
-                self.x_2_enable = false;
-                xl_fft = self.xl_2.to_vec();
-                xr_fft = self.xr_2.to_vec();
-                self.count2 = 0;
-                fft_ready = true;
-            }
-            // invariants:  !x_1_enable => x_2_enable
-            //              !x_2_enable => x_1_enable
-            //              count1 <= SIZE
-            //              count2 <= SIZE
+            // === buffering inputs ============================================
+            // apply windowing function based on count and push to buffer
+            let xl = *left_in;
+            let xr = *right_in;
+            self.xl_samp.pop_front();
+            self.xl_samp.push_back(Complex::new(xl, 0.0));
+            self.xr_samp.pop_front();
+            self.xr_samp.push_back(Complex::new(xr, 0.0));
+            self.count += 1;
+            // !!! invariant: xl_samp.size == SIZE
+            // !!! invariant: xr_samp.size == SIZE
 
             // === perform FFT on inputs =======================================
-            // if buffer is full, perform FFT
-            if fft_ready{
-                self.fft.process(&mut xl_fft, &mut self.fft_l);
-                self.fft.process(&mut xr_fft, &mut self.fft_r);
+            // if buffer has advanced by 25% (75% overlap), perform FFT
+            if self.count >= SIZE/4{
+                self.count = 0;
+
+                let mut xl_fft: Vec<Complex<f32>> = Vec::with_capacity(SIZE);
+                let mut xr_fft: Vec<Complex<f32>> = Vec::with_capacity(SIZE);
+                for i in 0..SIZE{
+                    xl_fft.push(self.xl_samp[i]);
+                    xr_fft.push(self.xr_samp[i]);
+                }
+
+                // apply windowing function
+                for i in 0..SIZE{
+                    xl_fft[i] = compute::win_hann(xl_fft[i], i, L_DIV);
+                    xr_fft[i] = compute::win_hann(xr_fft[i], i, L_DIV);
+                }
+
+                self.fft.process(&mut xl_fft, &mut self.xl_bins);
+                self.fft.process(&mut xr_fft, &mut self.xr_bins);
 
                 // normalize
-                self.fft_l.iter_mut().for_each(|elem| *elem /= SIZE as f32);
-                self.fft_r.iter_mut().for_each(|elem| *elem /= SIZE as f32);
+                self.xl_bins.iter_mut().for_each(|elem| *elem *= L_DIV);
+                self.xr_bins.iter_mut().for_each(|elem| *elem *= L_DIV);
 
                 // clean up
                 // self.xl.clear();
                 // self.xr.clear();
 
                 // === spectral freeze =========================================
+                // process bins
                 for i in 0..SIZE{
-                    self.ifft_l[i] = {
-                        let (x_amp, x_phi) = self.fft_l[i].to_polar();
-                        let (p_amp, p_phi) = self.p_ifft_l[i].to_polar();
-                        let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
-                        let y_phi = x_phi * (1.0 - freeze) + p_phi * freeze;
-                        Complex::from_polar(y_amp, y_phi)
-                    };
-                    self.ifft_r[i] = {
-                        let (x_amp, x_phi) = self.fft_r[i].to_polar();
-                        let (p_amp, p_phi) = self.p_ifft_r[i].to_polar();
-                        let y_amp = x_amp * (1.0 - freeze) + p_amp * freeze;
-                        let y_phi = x_phi * (1.0 - freeze) + p_phi * freeze;
-                        Complex::from_polar(y_amp, y_phi)
-                    };
-                    self.p_ifft_l[i] = self.ifft_l[i];
-                    self.p_ifft_r[i] = self.ifft_r[i];
+                    
+                    // amplitude
+                    let r_left_res = r_left*(1.0 - freeze) + r_left_p*freeze;
+                    let r_right_res = r_right*(1.0 - freeze) + r_right_p*freeze;
+                    
+                    // phase
+                    let mut rand_aux_1 = self.rng.next_u64() as f32 / u64::MAX as f32;
+                    let mut rand_aux_2 = self.rng.next_u64() as f32 / u64::MAX as f32;
+                    rand_aux_1 = (rand_aux_1 - 0.5)*diffuse;
+                    rand_aux_2 = (rand_aux_2 - 0.5)*diffuse;
+
+                    // save result
+                    self.xl_bins[i] = Complex::from_polar(r_left_res, phi_left_res);
+                    self.xr_bins[i] = Complex::from_polar(r_right_res, phi_right_res);
+
+                    // apply delay
                 }
+                
 
                 // === inverse FFT & deinterlacing =============================
 
                 // inverse fft
-                let mut auxl = vec![Complex::zero(); SIZE];
-                let mut auxr = vec![Complex::zero(); SIZE];
-                self.ifft.process(&mut self.ifft_l, &mut auxl);
-                self.ifft.process(&mut self.ifft_r, &mut auxr);
+                let mut xl_samp_i: Vec<Complex<f32>> = vec![Complex::zero(); SIZE];
+                let mut xr_samp_i: Vec<Complex<f32>> = vec![Complex::zero(); SIZE];
+                self.ifft.process(&mut self.xl_bins, &mut xl_samp_i);
+                self.ifft.process(&mut self.xr_bins, &mut xr_samp_i);
 
-                // convert to deques
-                self.yl = VecDeque::from(auxl);
-                self.yr = VecDeque::from(auxr);
+                // apply window to output (total window = hann^2)
+                for i in 0..SIZE{
+                    xl_samp_i[i] = compute::win_hann(xl_samp_i[i], i, L_DIV);
+                    xr_samp_i[i] = compute::win_hann(xr_samp_i[i], i, L_DIV);
 
-                // discard first and last PADDING samples (deinterlace)
-                for i in 0..PADDING{
-                    self.yl.pop_front();
-                    self.yr.pop_front();
-                    self.yl.pop_back();
-                    self.yr.pop_back();
+                    // sum output into output buffer
+                    let auxl = self.yl_samp.pop_front().unwrap();
+                    let auxr = self.yr_samp.pop_front().unwrap();
+                    self.yl_samp.push_back(auxl + xl_samp_i[i].re*_2_DIV_3);
+                    self.yr_samp.push_back(auxr + xr_samp_i[i].re*_2_DIV_3);
+                    // NOTE: all samples are popped and pushed, so they return
+                    // to their initial positions. Ordering is not affected
                 }
             }
 
             // === output ======================================================
-            *left_out = match self.yl.pop_front(){
-                Some(val) => val.re,
+            *left_out = match self.yl_samp.pop_front(){
+                Some(val) => val,
                 None => 0.0,
             };
-            *right_out = match self.yr.pop_front(){
-                Some(val) => val.re,
+            *right_out = match self.yr_samp.pop_front(){
+                Some(val) => val,
                 None => 0.0,
             };
+            self.yl_samp.push_back(0.0);
+            self.yr_samp.push_back(0.0);
         }
     }
 
@@ -273,6 +265,7 @@ impl PluginParameters for EffectParameters {
             // Pendulum parameters
             //0 => self.len_ratio.get(),
             0 => self.freeze.get(),
+            1 => self.diffuse.get(),
             _ => 0.0,
         }
     }
@@ -284,6 +277,7 @@ impl PluginParameters for EffectParameters {
             // Pendulum parameters
             //0 => self.len_ratio.set(val),
             0 => self.freeze.set(val),
+            1 => self.diffuse.set(val),
             _ => (),
         }
     }
@@ -295,6 +289,7 @@ impl PluginParameters for EffectParameters {
             // Pendulum parameters
             //0 => format!("L1: {:.2}, L2: {:.2}", 1.0-self.len_ratio.get(), self.len_ratio.get()),
             0 => format!("{:.2}", self.freeze.get()),
+            1 => format!("{:.2}", self.diffuse.get()),
             _ => "".to_string(),
         }
     }
@@ -304,6 +299,7 @@ impl PluginParameters for EffectParameters {
         match index {
             //0 => "L1 <=> L2",
             0 => "freeze",
+            1 => "diffuse",
             _ => "",
         }
         .to_string()
