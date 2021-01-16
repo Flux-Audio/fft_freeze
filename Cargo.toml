@@ -1,0 +1,20 @@
+[package]
+name = "spec_freeze"
+version = "0.1.0"
+authors = ["Lorenzo Panieri <panierilorenzo@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rustfft = "4.0.0"
+vst = "0.2.1"
+rand_xoshiro = "0.4.0"
+
+[lib]
+name = "SPEC_FREEZE"
+crate-type = ["cdylib"]
+
+[profile.dev]
+opt-level = 3
+lto = "fat"
