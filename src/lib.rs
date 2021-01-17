@@ -11,7 +11,6 @@ use std::collections::VecDeque;
 
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256Plus;
-use rand_xoshiro::rand_core::RngCore;
 
 use rustfft::algorithm::Radix4;
 use rustfft::FFT;
@@ -49,20 +48,8 @@ struct Effect {
     xr_samp: VecDeque<Complex<f32>>,
 
     // frequency-domain variables
-    xl_bins_z1: Vec<Complex<f32>>,
-    xr_bins_z1: Vec<Complex<f32>>,
     yl_bins_z1: Vec<Complex<f32>>,
     yr_bins_z1: Vec<Complex<f32>>,
-    yl_bins_z2: Vec<Complex<f32>>,
-    yr_bins_z2: Vec<Complex<f32>>,
-    yl_bins_z3: Vec<Complex<f32>>,
-    yr_bins_z3: Vec<Complex<f32>>,
-    yl_bins_z4: Vec<Complex<f32>>,
-    yr_bins_z4: Vec<Complex<f32>>,
-    yl_bins_z: Vec<Vec<Complex<f32>>>,
-    yr_bins_z: Vec<Vec<Complex<f32>>>,
-    d_yl_phi_z1: Vec<f32>,
-    d_yr_phi_z1: Vec<f32>,
 
     // output buffer
     yl_samp: VecDeque<f32>,
@@ -95,20 +82,8 @@ impl Default for Effect {
             count: 0,
             xl_samp: VecDeque::from(vec![Complex::zero(); SIZE]),
             xr_samp: VecDeque::from(vec![Complex::zero(); SIZE]),
-            xl_bins_z1: vec![Complex::zero(); SIZE],
-            xr_bins_z1: vec![Complex::zero(); SIZE],
             yl_bins_z1: vec![Complex::zero(); SIZE],
             yr_bins_z1: vec![Complex::zero(); SIZE],
-            yl_bins_z2: vec![Complex::zero(); SIZE],
-            yr_bins_z2: vec![Complex::zero(); SIZE],
-            yl_bins_z3: vec![Complex::zero(); SIZE],
-            yr_bins_z3: vec![Complex::zero(); SIZE],
-            yl_bins_z4: vec![Complex::zero(); SIZE],
-            yr_bins_z4: vec![Complex::zero(); SIZE],
-            yl_bins_z: vec![vec![Complex::zero(); SIZE]; 32],
-            yr_bins_z: vec![vec![Complex::zero(); SIZE]; 32],
-            d_yl_phi_z1: vec![0.0; SIZE],
-            d_yr_phi_z1: vec![0.0; SIZE],
             yl_samp: VecDeque::from(vec![0.0; SIZE]),
             yr_samp: VecDeque::from(vec![0.0; SIZE]),
         }
@@ -185,9 +160,7 @@ impl Plugin for Effect {
             // !!! invariant: xr_samp.size == SIZE
 
             // === perform FFT on inputs =======================================
-            // if buffer has advanced by 12.5% (87.5% overlap), perform FFT
-            // TODO: run fft processing on separate thread, join previous fft
-            // at start of next fft frame
+            // if buffer has advanced by 25% (75% overlap), perform FFT
             if self.count >= SIZE/4{
                 self.count = 0;
 
@@ -216,60 +189,14 @@ impl Plugin for Effect {
                 xr_bins.iter_mut().for_each(|elem| *elem *= L_DIV);
 
                 // === spectral freeze =========================================
-                // interpolate previous output's amplitude with input amplitude
-                // interpolate previous output's delta phase with input delta phase
-                // add interpolated delta phase to previous phase
                 for i in 0..SIZE{
-
-                    /*
-                    // average bins, first get coprime set of delay taps
-                    let yl_p = Complex::new(self.yl_bins_z[2][i].re, self.yl_bins_z[4][i].im);
-                    let yr_p = Complex::new(self.yr_bins_z[2][i].re, self.yr_bins_z[4][i].im);
-
-                    xl_bins[i] = xl_bins[i]*(1.0 - freeze) + yl_p*freeze;
-                    xr_bins[i] = xr_bins[i]*(1.0 - freeze) + yr_p*freeze;
-
-                    // apply phase randomization
-                    let mut rand_aux_1 = compute::randf(&mut self.rng);
-                    let mut rand_aux_2 = compute::randf(&mut self.rng);
-                    rand_aux_1 = (rand_aux_1 - 0.5)*diffuse*std::f32::consts::PI;
-                    rand_aux_2 = (rand_aux_2 - 0.5)*diffuse*std::f32::consts::PI;
-                    
-                    let (yl_r, yl_phi) = xl_bins[i].to_polar();
-                    let (yr_r, yr_phi) = xr_bins[i].to_polar();
-
-                    xl_bins[i] = Complex::from_polar(yl_r, yl_phi + rand_aux_1);
-                    xr_bins[i] = Complex::from_polar(yr_r, yr_phi + rand_aux_2);
-
-                    // update delay line
-                    for j in 0..31{
-                        self.yl_bins_z[31 - j][i] = self.yl_bins_z[30 - j][i];
-                        self.yr_bins_z[31 - j][i] = self.yr_bins_z[30 - j][i];
-                    }
-                    self.yl_bins_z[0][i] = xl_bins[i];
-                    self.yr_bins_z[0][i] = xr_bins[i];
-
-                    */
-                    
-                    
                     // convert bins to polar
                     // input bins
                     let (xl_r, xl_phi) = xl_bins[i].to_polar();
                     let (xr_r, xr_phi) = xr_bins[i].to_polar();
-                    // previous input bins
-                    let (_, xl_phi_z1) = self.xl_bins_z1[i].to_polar();
-                    let (_, xr_phi_z1) = self.xr_bins_z1[i].to_polar();
                     // previous output bins
-                    let (yl_r_z1, yl_phi_z1) = self.yl_bins_z[0][i].to_polar();
-                    let (yr_r_z1, yr_phi_z1) = self.yr_bins_z[0][i].to_polar();
-
-                    // update previous input bins
-                    self.xl_bins_z1[i] = xl_bins[i];
-                    self.xr_bins_z1[i] = xr_bins[i];
-
-                    // get input deltas
-                    let d_xl_phi = xl_phi - xl_phi_z1;
-                    let d_xr_phi = xr_phi - xr_phi_z1;
+                    let (yl_r_z1, yl_phi_z1) = self.yl_bins_z1[i].to_polar();
+                    let (yr_r_z1, yr_phi_z1) = self.yr_bins_z1[i].to_polar();
                     
                     // amplitude freezing
                     let yl_r = xl_r*(1.0 - freeze) + yl_r_z1*freeze;
@@ -282,10 +209,6 @@ impl Plugin for Effect {
                     rand_aux_2 = (rand_aux_2 - 0.5)*diffuse*std::f32::consts::TAU;
 
                     // phase freeze
-                    /*
-                    let d_yl_phi = d_xl_phi*(1.0 - freeze) + self.d_yl_phi_z1[i]*freeze*0.75;
-                    let d_yr_phi = d_xr_phi*(1.0 - freeze) + self.d_yr_phi_z1[i]*freeze*0.75;
-                    */
                     let yl_phi = xl_phi*(1.0 - freeze) + yl_phi_z1*freeze + rand_aux_1;
                     let yr_phi = xr_phi*(1.0 - freeze) + yr_phi_z1*freeze + rand_aux_2;
 
@@ -294,17 +217,8 @@ impl Plugin for Effect {
                     xr_bins[i] = Complex::from_polar(yr_r, yr_phi);
 
                     // update previous output bins
-                    self.yl_bins_z[3][i] = self.yl_bins_z[2][i];
-                    self.yl_bins_z[2][i] = self.yl_bins_z[1][i];
-                    self.yl_bins_z[1][i] = self.yl_bins_z[0][i];
-                    self.yl_bins_z[0][i] = xl_bins[i];
-
-                    self.yr_bins_z[3][i] = self.yr_bins_z[2][i];
-                    self.yr_bins_z[2][i] = self.yr_bins_z[1][i];
-                    self.yr_bins_z[1][i] = self.yr_bins_z[0][i];
-                    self.yr_bins_z[0][i] = xr_bins[i];
-                    //self.d_yl_phi_z1[i] = d_yl_phi;
-                    //self.d_yr_phi_z1[i] = d_yr_phi;
+                    self.yl_bins_z1[i] = xl_bins[i];
+                    self.yr_bins_z1[i] = xr_bins[i];
                 }
 
                 // === inverse FFT =============================================
@@ -355,8 +269,6 @@ impl PluginParameters for EffectParameters {
     // the `get_parameter` function reads the value of a parameter.
     fn get_parameter(&self, index: i32) -> f32 {
         match index {
-            // Pendulum parameters
-            //0 => self.len_ratio.get(),
             0 => self.freeze.get(),
             1 => self.diffuse.get(),
             _ => 0.0,
@@ -367,8 +279,6 @@ impl PluginParameters for EffectParameters {
     fn set_parameter(&self, index: i32, val: f32) {
         #[allow(clippy::single_match)]
         match index {
-            // Pendulum parameters
-            //0 => self.len_ratio.set(val),
             0 => self.freeze.set(val),
             1 => self.diffuse.set(val),
             _ => (),
@@ -379,8 +289,6 @@ impl PluginParameters for EffectParameters {
     // format it into a string that makes the most since.
     fn get_parameter_text(&self, index: i32) -> String {
         match index {
-            // Pendulum parameters
-            //0 => format!("L1: {:.2}, L2: {:.2}", 1.0-self.len_ratio.get(), self.len_ratio.get()),
             0 => format!("{:.2}", self.freeze.get()),
             1 => format!("{:.2}", self.diffuse.get()),
             _ => "".to_string(),
@@ -390,7 +298,6 @@ impl PluginParameters for EffectParameters {
     // This shows the control's name.
     fn get_parameter_name(&self, index: i32) -> String {
         match index {
-            //0 => "L1 <=> L2",
             0 => "freeze",
             1 => "diffuse",
             _ => "",
