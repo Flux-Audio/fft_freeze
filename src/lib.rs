@@ -1,4 +1,5 @@
 #![feature(tau_constant)]
+#![feature(clamp)]
 #[macro_use]
 extern crate vst;
 
@@ -6,22 +7,22 @@ use vst::buffer::AudioBuffer;
 use vst::plugin::{Category, Info, Plugin, PluginParameters};
 use vst::util::AtomicFloat;
 
-use std::sync::Arc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256Plus;
 
 use rustfft::algorithm::Radix4;
-use rustfft::FFT;
 use rustfft::num_complex::Complex;
 use rustfft::num_traits::Zero;
+use rustfft::FFT;
 
 mod compute;
 
-const SIZE: usize = 4096;   // must be of the form 2^k >= 32
-const L_DIV: f32 = 1.0/ (SIZE as f32);
-const _NORM: f32 = 2.0/3.0;
+const SIZE: usize = 4096; // must be of the form 2^k >= 32
+const L_DIV: f32 = 1.0 / (SIZE as f32);
+const _NORM: f32 = 2.0 / 3.0;
 
 struct Effect {
     // Store a handle to the plugin's parameter object.
@@ -30,14 +31,14 @@ struct Effect {
     // meta variables
     rng: Xoshiro256Plus,
     sr: f32,
-    scale: f64,     // scaling factor for sr independence of integrals
+    scale: f64, // scaling factor for sr independence of integrals
 
     // FFT engines
     fft: Radix4<f32>,
     ifft: Radix4<f32>,
 
     // other variables
-    env: VecDeque<f32>,         // envelope follower
+    env_z1: f32, // envelope follower
 
     // FFT variables
     // sample counter (counts to SIZE/4)
@@ -59,6 +60,8 @@ struct Effect {
 struct EffectParameters {
     freeze: AtomicFloat,
     diffuse: AtomicFloat,
+    env_amt: AtomicFloat,
+    env_time: AtomicFloat,
 }
 
 impl Default for Effect {
@@ -76,7 +79,7 @@ impl Default for Effect {
             ifft: Radix4::new(SIZE, true),
 
             // pre-fill misc variables
-            env: VecDeque::from(vec![0.0; SIZE]),
+            env_z1: 0.0,
 
             // pre-fill FFT variables
             count: 0,
@@ -95,6 +98,8 @@ impl Default for EffectParameters {
         EffectParameters {
             freeze: AtomicFloat::new(0.0),
             diffuse: AtomicFloat::new(0.0),
+            env_amt: AtomicFloat::new(0.5),
+            env_time: AtomicFloat::new(0.0),
         }
     }
 }
@@ -104,7 +109,7 @@ impl Default for EffectParameters {
 impl Plugin for Effect {
     fn get_info(&self) -> Info {
         Info {
-            name: "SPEC_FREEZE".to_string(),
+            name: "FFT_FREEZE".to_string(),
             vendor: "Flux-Audio".to_string(),
             unique_id: 72763875,
             version: 010,
@@ -112,15 +117,16 @@ impl Plugin for Effect {
             outputs: 2,
             // This `parameters` bit is important; without it, none of our
             // parameters will be shown!
-            parameters: 2,
-            category: Category::Generator,
+            parameters: 4,
+            category: Category::Effect,
+            initial_delay: 1024,
             ..Default::default()
         }
     }
 
-    fn set_sample_rate(&mut self, rate: f32){
+    fn set_sample_rate(&mut self, rate: f32) {
         self.sr = rate;
-        self.scale = 44100.0 / rate as f64; 
+        self.scale = 44100.0 / rate as f64;
     }
 
     // called once
@@ -141,11 +147,10 @@ impl Plugin for Effect {
         // process
         for ((left_in, right_in), (left_out, right_out)) in stereo_in.zip(stereo_out) {
             // === get params ==================================================
-            let freeze = self.params.freeze.get().sqrt();
-            let diffuse = freeze*self.params.diffuse.get();
-            let freeze_gain = 1.0 + 3.0*freeze;
-
-            // === envelope follower ===========================================
+            let mut freeze = self.params.freeze.get().sqrt();
+            let diffuse = self.params.diffuse.get();
+            let env_amt = self.params.env_amt.get()*4.0 - 2.0;
+            let env_time = self.params.env_time.get().sqrt();
 
             // === buffering inputs ============================================
             // rotate buffer, pushing new samples and discarding front
@@ -161,19 +166,19 @@ impl Plugin for Effect {
 
             // === perform FFT on inputs =======================================
             // if buffer has advanced by 25% (75% overlap), perform FFT
-            if self.count >= SIZE/4{
+            if self.count >= SIZE/4 {
                 self.count = 0;
 
                 // deep-copy input buffers into fft input
                 let mut xl_fft: Vec<Complex<f32>> = Vec::with_capacity(SIZE);
                 let mut xr_fft: Vec<Complex<f32>> = Vec::with_capacity(SIZE);
-                for i in 0..SIZE{
+                for i in 0..SIZE {
                     xl_fft.push(self.xl_samp[i]);
                     xr_fft.push(self.xr_samp[i]);
                 }
 
                 // apply windowing function twice
-                for i in 0..SIZE{
+                for i in 0..SIZE {
                     xl_fft[i] = compute::win_hann(xl_fft[i], i, L_DIV);
                     xr_fft[i] = compute::win_hann(xr_fft[i], i, L_DIV);
                 }
@@ -188,8 +193,25 @@ impl Plugin for Effect {
                 xl_bins.iter_mut().for_each(|elem| *elem *= L_DIV);
                 xr_bins.iter_mut().for_each(|elem| *elem *= L_DIV);
 
+                // === envelope follower =======================================
+                // take max of absolute values
+                let mut max = 0.0;
+                for i in 0..SIZE {
+                    let aux = xl_fft[i].re.abs();
+                    if aux > max {
+                        max = aux;
+                    }
+                    let aux = xr_fft[i].re.abs();
+                    if aux > max {
+                        max = aux;
+                    }
+                }
+                // envelope is moving average with previous max
+                self.env_z1 = self.env_z1*env_time + max*(1.0 - env_time);
+                freeze = (freeze + self.env_z1*env_amt).clamp(0.0, 1.0);
+
                 // === spectral freeze =========================================
-                for i in 0..SIZE{
+                for i in 0..SIZE {
                     // convert bins to polar
                     // input bins
                     let (xl_r, xl_phi) = xl_bins[i].to_polar();
@@ -197,11 +219,11 @@ impl Plugin for Effect {
                     // previous output bins
                     let (yl_r_z1, yl_phi_z1) = self.yl_bins_z1[i].to_polar();
                     let (yr_r_z1, yr_phi_z1) = self.yr_bins_z1[i].to_polar();
-                    
+
                     // amplitude freezing
                     let yl_r = xl_r*(1.0 - freeze) + yl_r_z1*freeze;
                     let yr_r = xr_r*(1.0 - freeze) + yr_r_z1*freeze;
-                    
+
                     // generate random phase offsets
                     let mut rand_aux_1 = compute::randf(&mut self.rng);
                     let mut rand_aux_2 = compute::randf(&mut self.rng);
@@ -209,8 +231,8 @@ impl Plugin for Effect {
                     rand_aux_2 = (rand_aux_2 - 0.5)*diffuse*std::f32::consts::TAU;
 
                     // phase freeze
-                    let yl_phi = xl_phi*(1.0 - freeze) + yl_phi_z1*freeze + rand_aux_1;
-                    let yr_phi = xr_phi*(1.0 - freeze) + yr_phi_z1*freeze + rand_aux_2;
+                    let yl_phi = xl_phi*(1.0 - freeze) + yl_phi_z1*freeze + rand_aux_1*freeze;
+                    let yr_phi = xr_phi*(1.0 - freeze) + yr_phi_z1*freeze + rand_aux_2*freeze;
 
                     // save result
                     xl_bins[i] = Complex::from_polar(yl_r, yl_phi);
@@ -229,7 +251,7 @@ impl Plugin for Effect {
                 self.ifft.process(&mut xr_bins, &mut xr_samp_i);
 
                 // apply window to output twice (total window = hann^4)
-                for i in 0..SIZE{
+                for i in 0..SIZE {
                     xl_samp_i[i] = compute::win_hann(xl_samp_i[i], i, L_DIV);
                     xr_samp_i[i] = compute::win_hann(xr_samp_i[i], i, L_DIV);
 
@@ -245,12 +267,12 @@ impl Plugin for Effect {
 
             // === output ======================================================
             // compensate for freeze gain loss
-            *left_out = match self.yl_samp.pop_front(){
-                Some(val) => val*freeze_gain,
+            *left_out = match self.yl_samp.pop_front() {
+                Some(val) => val,
                 None => 0.0,
             };
-            *right_out = match self.yr_samp.pop_front(){
-                Some(val) => val*freeze_gain,
+            *right_out = match self.yr_samp.pop_front() {
+                Some(val) => val,
                 None => 0.0,
             };
             self.yl_samp.push_back(0.0);
@@ -271,6 +293,8 @@ impl PluginParameters for EffectParameters {
         match index {
             0 => self.freeze.get(),
             1 => self.diffuse.get(),
+            2 => self.env_amt.get(),
+            3 => self.env_time.get(),
             _ => 0.0,
         }
     }
@@ -281,6 +305,8 @@ impl PluginParameters for EffectParameters {
         match index {
             0 => self.freeze.set(val),
             1 => self.diffuse.set(val),
+            2 => self.env_amt.set(val),
+            3 => self.env_time.set(val),
             _ => (),
         }
     }
@@ -291,6 +317,8 @@ impl PluginParameters for EffectParameters {
         match index {
             0 => format!("{:.2}", self.freeze.get()),
             1 => format!("{:.2}", self.diffuse.get()),
+            2 => format!("{:.2}", self.env_amt.get()*4.0 - 2.0),
+            3 => format!("{:.2}", self.env_time.get()),
             _ => "".to_string(),
         }
     }
@@ -300,6 +328,8 @@ impl PluginParameters for EffectParameters {
         match index {
             0 => "freeze",
             1 => "diffuse",
+            2 => "envelope amount",
+            3 => "envelope time",
             _ => "",
         }
         .to_string()

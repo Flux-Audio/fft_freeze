@@ -1,5 +1,5 @@
 [package]
-name = "spec_freeze"
+name = "FFT_FREEZE"
 version = "0.1.0"
 authors = ["Lorenzo Panieri <panierilorenzo@gmail.com>"]
 edition = "2018"
@@ -12,9 +12,9 @@ vst = "0.2.1"
 rand_xoshiro = "0.4.0"
 
 [lib]
-name = "SPEC_FREEZE"
+name = "FFT_FREEZE_v0_1_0"
 crate-type = ["cdylib"]
 
-[profile.dev]
+[profile.release]
 opt-level = 3
 lto = "fat"

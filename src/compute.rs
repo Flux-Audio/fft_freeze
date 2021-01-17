@@ -1,16 +1,16 @@
 use rustfft::num_complex::Complex;
 
+use rand_xoshiro::rand_core::RngCore;
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256Plus;
-use rand_xoshiro::rand_core::RngCore;
 
 /// hann window function
 /// - x: input
 /// - i: index
 /// - l_div: reciprocal of window length
-pub fn win_hann(x: Complex<f32>, i: usize, l_div: f32) -> Complex<f32>{
-    let sin_i = (i as f32  *  std::f32::consts::PI  *  l_div).sin();
-    return x*sin_i*sin_i;
+pub fn win_hann(x: Complex<f32>, i: usize, l_div: f32) -> Complex<f32> {
+    let sin_i = (i as f32 * std::f32::consts::PI * l_div).sin();
+    return x * sin_i * sin_i;
 }
 
 /// random float [0, 1)
