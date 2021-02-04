@@ -149,7 +149,7 @@ impl Plugin for Effect {
             // === get params ==================================================
             let mut freeze = self.params.freeze.get().sqrt();
             let diffuse = self.params.diffuse.get();
-            let env_amt = self.params.env_amt.get()*4.0 - 2.0;
+            let env_amt = self.params.env_amt.get() * 4.0 - 2.0;
             let env_time = self.params.env_time.get().sqrt();
 
             // === buffering inputs ============================================
@@ -166,7 +166,7 @@ impl Plugin for Effect {
 
             // === perform FFT on inputs =======================================
             // if buffer has advanced by 25% (75% overlap), perform FFT
-            if self.count >= SIZE/4 {
+            if self.count >= SIZE / 4 {
                 self.count = 0;
 
                 // deep-copy input buffers into fft input
@@ -207,8 +207,8 @@ impl Plugin for Effect {
                     }
                 }
                 // envelope is moving average with previous max
-                self.env_z1 = self.env_z1*env_time + max*(1.0 - env_time);
-                freeze = (freeze + self.env_z1*env_amt).clamp(0.0, 1.0);
+                self.env_z1 = self.env_z1 * env_time + max * (1.0 - env_time);
+                freeze = (freeze + self.env_z1 * env_amt).clamp(0.0, 1.0);
 
                 // === spectral freeze =========================================
                 for i in 0..SIZE {
@@ -221,18 +221,18 @@ impl Plugin for Effect {
                     let (yr_r_z1, yr_phi_z1) = self.yr_bins_z1[i].to_polar();
 
                     // amplitude freezing
-                    let yl_r = xl_r*(1.0 - freeze) + yl_r_z1*freeze;
-                    let yr_r = xr_r*(1.0 - freeze) + yr_r_z1*freeze;
+                    let yl_r = xl_r * (1.0 - freeze) + yl_r_z1 * freeze;
+                    let yr_r = xr_r * (1.0 - freeze) + yr_r_z1 * freeze;
 
                     // generate random phase offsets
                     let mut rand_aux_1 = compute::randf(&mut self.rng);
                     let mut rand_aux_2 = compute::randf(&mut self.rng);
-                    rand_aux_1 = (rand_aux_1 - 0.5)*diffuse*std::f32::consts::TAU;
-                    rand_aux_2 = (rand_aux_2 - 0.5)*diffuse*std::f32::consts::TAU;
+                    rand_aux_1 = (rand_aux_1 - 0.5) * diffuse * std::f32::consts::TAU;
+                    rand_aux_2 = (rand_aux_2 - 0.5) * diffuse * std::f32::consts::TAU;
 
                     // phase freeze
-                    let yl_phi = xl_phi*(1.0 - freeze) + yl_phi_z1*freeze + rand_aux_1*freeze;
-                    let yr_phi = xr_phi*(1.0 - freeze) + yr_phi_z1*freeze + rand_aux_2*freeze;
+                    let yl_phi = xl_phi * (1.0 - freeze) + yl_phi_z1 * freeze + rand_aux_1 * freeze;
+                    let yr_phi = xr_phi * (1.0 - freeze) + yr_phi_z1 * freeze + rand_aux_2 * freeze;
 
                     // save result
                     xl_bins[i] = Complex::from_polar(yl_r, yl_phi);
@@ -258,8 +258,8 @@ impl Plugin for Effect {
                     // sum output into output buffer
                     let auxl = self.yl_samp.pop_front().unwrap();
                     let auxr = self.yr_samp.pop_front().unwrap();
-                    self.yl_samp.push_back(auxl + xl_samp_i[i].re*_NORM);
-                    self.yr_samp.push_back(auxr + xr_samp_i[i].re*_NORM);
+                    self.yl_samp.push_back(auxl + xl_samp_i[i].re * _NORM);
+                    self.yr_samp.push_back(auxr + xr_samp_i[i].re * _NORM);
                     // NOTE: all samples are popped and pushed, so they return
                     // to their initial positions. Ordering is not affected
                 }
@@ -317,7 +317,7 @@ impl PluginParameters for EffectParameters {
         match index {
             0 => format!("{:.2}", self.freeze.get()),
             1 => format!("{:.2}", self.diffuse.get()),
-            2 => format!("{:.2}", self.env_amt.get()*4.0 - 2.0),
+            2 => format!("{:.2}", self.env_amt.get() * 4.0 - 2.0),
             3 => format!("{:.2}", self.env_time.get()),
             _ => "".to_string(),
         }
