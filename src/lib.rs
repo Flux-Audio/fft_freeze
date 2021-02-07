@@ -22,6 +22,7 @@ mod compute;
 
 const SIZE: usize = 4096; // must be of the form 2^k >= 32
 const L_DIV: f32 = 1.0 / (SIZE as f32);
+const OVERLAP: usize = 4; // what proportion of the fft is overlapped (i.e. 4 -> 3/4)
 const _NORM: f32 = 2.0 / 3.0;
 
 struct Effect {
@@ -58,6 +59,8 @@ struct Effect {
 }
 
 struct EffectParameters {
+    window_mode: AtomicFloat,
+    freeze_mode: AtomicFloat,
     freeze: AtomicFloat,
     diffuse: AtomicFloat,
     env_amt: AtomicFloat,
@@ -96,6 +99,8 @@ impl Default for Effect {
 impl Default for EffectParameters {
     fn default() -> EffectParameters {
         EffectParameters {
+            window_mode: AtomicFloat::new(0.0),
+            freeze_mode: AtomicFloat::new(0.0),
             freeze: AtomicFloat::new(0.0),
             diffuse: AtomicFloat::new(0.0),
             env_amt: AtomicFloat::new(0.5),
@@ -112,12 +117,12 @@ impl Plugin for Effect {
             name: "FFT_FREEZE".to_string(),
             vendor: "Flux-Audio".to_string(),
             unique_id: 72763875,
-            version: 010,
+            version: 020,
             inputs: 2,
             outputs: 2,
             // This `parameters` bit is important; without it, none of our
             // parameters will be shown!
-            parameters: 4,
+            parameters: 6,
             category: Category::Effect,
             initial_delay: 1024,
             ..Default::default()
@@ -151,6 +156,8 @@ impl Plugin for Effect {
             let diffuse = self.params.diffuse.get();
             let env_amt = self.params.env_amt.get() * 4.0 - 2.0;
             let env_time = self.params.env_time.get().sqrt();
+            let window_mode = (self.params.window_mode.get() * 3.0).round() as u16;
+            let freeze_mode = (self.params.freeze_mode.get() * 6.0).round() as u16;
 
             // === buffering inputs ============================================
             // rotate buffer, pushing new samples and discarding front
@@ -166,7 +173,7 @@ impl Plugin for Effect {
 
             // === perform FFT on inputs =======================================
             // if buffer has advanced by 25% (75% overlap), perform FFT
-            if self.count >= SIZE / 4 {
+            if self.count >= SIZE / OVERLAP {
                 self.count = 0;
 
                 // deep-copy input buffers into fft input
@@ -177,10 +184,27 @@ impl Plugin for Effect {
                     xr_fft.push(self.xr_samp[i]);
                 }
 
-                // apply windowing function twice
+                // apply windowing function
                 for i in 0..SIZE {
-                    xl_fft[i] = compute::win_hann(xl_fft[i], i, L_DIV);
-                    xr_fft[i] = compute::win_hann(xr_fft[i], i, L_DIV);
+                    match window_mode {
+                        0 => {
+                            xl_fft[i] = compute::win_hann(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = compute::win_hann(xr_fft[i], i, L_DIV);
+                        }
+                        1 => {
+                            xl_fft[i] = compute::win_tri(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = compute::win_tri(xr_fft[i], i, L_DIV);
+                        }
+                        2 => {
+                            xl_fft[i] = compute::win_black(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = compute::win_black(xr_fft[i], i, L_DIV);
+                        }
+                        3 => {
+                            xl_fft[i] = compute::win_flat(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = compute::win_flat(xr_fft[i], i, L_DIV);
+                        }
+                        _ => {}
+                    }
                 }
 
                 // forward fft
@@ -211,36 +235,56 @@ impl Plugin for Effect {
                 freeze = (freeze + self.env_z1 * env_amt).clamp(0.0, 1.0);
 
                 // === spectral freeze =========================================
-                for i in 0..SIZE {
-                    // convert bins to polar
-                    // input bins
-                    let (xl_r, xl_phi) = xl_bins[i].to_polar();
-                    let (xr_r, xr_phi) = xr_bins[i].to_polar();
-                    // previous output bins
-                    let (yl_r_z1, yl_phi_z1) = self.yl_bins_z1[i].to_polar();
-                    let (yr_r_z1, yr_phi_z1) = self.yr_bins_z1[i].to_polar();
-
-                    // amplitude freezing
-                    let yl_r = xl_r * (1.0 - freeze) + yl_r_z1 * freeze;
-                    let yr_r = xr_r * (1.0 - freeze) + yr_r_z1 * freeze;
-
-                    // generate random phase offsets
-                    let mut rand_aux_1 = compute::randf(&mut self.rng);
-                    let mut rand_aux_2 = compute::randf(&mut self.rng);
-                    rand_aux_1 = (rand_aux_1 - 0.5) * diffuse * std::f32::consts::TAU;
-                    rand_aux_2 = (rand_aux_2 - 0.5) * diffuse * std::f32::consts::TAU;
-
-                    // phase freeze
-                    let yl_phi = xl_phi * (1.0 - freeze) + yl_phi_z1 * freeze + rand_aux_1 * freeze;
-                    let yr_phi = xr_phi * (1.0 - freeze) + yr_phi_z1 * freeze + rand_aux_2 * freeze;
-
-                    // save result
-                    xl_bins[i] = Complex::from_polar(yl_r, yl_phi);
-                    xr_bins[i] = Complex::from_polar(yr_r, yr_phi);
-
-                    // update previous output bins
-                    self.yl_bins_z1[i] = xl_bins[i];
-                    self.yr_bins_z1[i] = xr_bins[i];
+                match freeze_mode {
+                    0 => {
+                        compute::flat_freeze(
+                            SIZE,
+                            &mut xl_bins,
+                            &mut xr_bins,
+                            &mut self.yl_bins_z1,
+                            &mut self.yr_bins_z1,
+                            freeze,
+                            diffuse,
+                            &mut self.rng,
+                        );
+                    }
+                    1 => {
+                        compute::glitch_freeze(
+                            SIZE,
+                            &mut xl_bins,
+                            &mut xr_bins,
+                            &mut self.yl_bins_z1,
+                            &mut self.yr_bins_z1,
+                            freeze,
+                            diffuse,
+                            &mut self.rng,
+                        );
+                    }
+                    2 => {
+                        compute::random_freeze(
+                            SIZE,
+                            &mut xl_bins,
+                            &mut xr_bins,
+                            &mut self.yl_bins_z1,
+                            &mut self.yr_bins_z1,
+                            freeze,
+                            diffuse,
+                            &mut self.rng,
+                        );
+                    }
+                    3 => {
+                        compute::reso_freeze(
+                            SIZE,
+                            &mut xl_bins,
+                            &mut xr_bins,
+                            &mut self.yl_bins_z1,
+                            &mut self.yr_bins_z1,
+                            freeze,
+                            diffuse,
+                            &mut self.rng,
+                        );
+                    }
+                    _ => {}
                 }
 
                 // === inverse FFT =============================================
@@ -252,8 +296,25 @@ impl Plugin for Effect {
 
                 // apply window to output twice (total window = hann^4)
                 for i in 0..SIZE {
-                    xl_samp_i[i] = compute::win_hann(xl_samp_i[i], i, L_DIV);
-                    xr_samp_i[i] = compute::win_hann(xr_samp_i[i], i, L_DIV);
+                    match window_mode {
+                        0 => {
+                            xl_samp_i[i] = compute::win_hann(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = compute::win_hann(xr_samp_i[i], i, L_DIV);
+                        }
+                        1 => {
+                            xl_samp_i[i] = compute::win_tri(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = compute::win_tri(xr_samp_i[i], i, L_DIV);
+                        }
+                        2 => {
+                            xl_samp_i[i] = compute::win_black(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = compute::win_black(xr_samp_i[i], i, L_DIV);
+                        }
+                        3 => {
+                            xl_samp_i[i] = compute::win_flat(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = compute::win_flat(xr_samp_i[i], i, L_DIV);
+                        }
+                        _ => {}
+                    }
 
                     // sum output into output buffer
                     let auxl = self.yl_samp.pop_front().unwrap();
@@ -295,6 +356,8 @@ impl PluginParameters for EffectParameters {
             1 => self.diffuse.get(),
             2 => self.env_amt.get(),
             3 => self.env_time.get(),
+            4 => self.window_mode.get(),
+            5 => self.freeze_mode.get(),
             _ => 0.0,
         }
     }
@@ -307,6 +370,8 @@ impl PluginParameters for EffectParameters {
             1 => self.diffuse.set(val),
             2 => self.env_amt.set(val),
             3 => self.env_time.set(val),
+            4 => self.window_mode.set(val),
+            5 => self.freeze_mode.set(val),
             _ => (),
         }
     }
@@ -319,6 +384,29 @@ impl PluginParameters for EffectParameters {
             1 => format!("{:.2}", self.diffuse.get()),
             2 => format!("{:.2}", self.env_amt.get() * 4.0 - 2.0),
             3 => format!("{:.2}", self.env_time.get()),
+            4 => format!(
+                "{}",
+                match ((self.window_mode.get() * 3.0).round() as u16) {
+                    0 => "Balanced",
+                    1 => "Smear",
+                    2 => "Clean",
+                    3 => "Flutter",
+                    _ => "",
+                }
+            ),
+            5 => format!(
+                "{}",
+                match ((self.freeze_mode.get() * 6.0).round() as u16) {
+                    0 => "Normal",
+                    1 => "Glitchy",
+                    2 => "Random",
+                    3 => "Resonant",
+                    4 => "Fuzzy",
+                    5 => "Dull",
+                    6 => "Mashup",
+                    _ => "",
+                }
+            ),
             _ => "".to_string(),
         }
     }
@@ -330,6 +418,8 @@ impl PluginParameters for EffectParameters {
             1 => "diffuse",
             2 => "envelope amount",
             3 => "envelope time",
+            4 => "window mode",
+            5 => "freeze mode",
             _ => "",
         }
         .to_string()

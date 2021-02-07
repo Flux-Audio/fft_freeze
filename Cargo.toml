@@ -1,6 +1,6 @@
 [package]
 name = "FFT_FREEZE"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Lorenzo Panieri <panierilorenzo@gmail.com>"]
 edition = "2018"
 
@@ -12,8 +12,11 @@ vst = "0.2.1"
 rand_xoshiro = "0.4.0"
 
 [lib]
-name = "FFT_FREEZE_v0_1_0"
+name = "FFT_FREEZE_v0_2_0_dev"
 crate-type = ["cdylib"]
+
+[profile.dev]
+opt-level = 1
 
 [profile.release]
 opt-level = 3
