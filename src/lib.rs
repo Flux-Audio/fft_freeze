@@ -1,5 +1,3 @@
-#![feature(tau_constant)]
-#![feature(clamp)]
 #[macro_use]
 extern crate vst;
 
@@ -328,14 +326,8 @@ impl Plugin for Effect {
 
             // === output ======================================================
             // compensate for freeze gain loss
-            *left_out = match self.yl_samp.pop_front() {
-                Some(val) => val,
-                None => 0.0,
-            };
-            *right_out = match self.yr_samp.pop_front() {
-                Some(val) => val,
-                None => 0.0,
-            };
+            *left_out = self.yl_samp.pop_front().unwrap_or(0.0);
+            *right_out = self.yr_samp.pop_front().unwrap_or(0.0);
             self.yl_samp.push_back(0.0);
             self.yr_samp.push_back(0.0);
         }
@@ -384,19 +376,14 @@ impl PluginParameters for EffectParameters {
             1 => format!("{:.2}", self.diffuse.get()),
             2 => format!("{:.2}", self.env_amt.get() * 4.0 - 2.0),
             3 => format!("{:.2}", self.env_time.get()),
-            4 => format!(
-                "{}",
-                match ((self.window_mode.get() * 3.0).round() as u16) {
+            4 => match (self.window_mode.get() * 3.0).round() as u16 {
                     0 => "Balanced",
                     1 => "Smear",
                     2 => "Clean",
                     3 => "Flutter",
                     _ => "",
-                }
-            ),
-            5 => format!(
-                "{}",
-                match ((self.freeze_mode.get() * 6.0).round() as u16) {
+                }.to_string(),
+            5 => match (self.freeze_mode.get() * 6.0).round() as u16 {
                     0 => "Normal",
                     1 => "Glitchy",
                     2 => "Random",
@@ -405,8 +392,7 @@ impl PluginParameters for EffectParameters {
                     5 => "Dull",
                     6 => "Mashup",
                     _ => "",
-                }
-            ),
+                }.to_string(),
             _ => "".to_string(),
         }
     }
