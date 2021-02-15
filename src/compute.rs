@@ -3,6 +3,8 @@ use rustfft::num_complex::Complex;
 use rand_xoshiro::rand_core::RngCore;
 use rand_xoshiro::Xoshiro256Plus;
 
+use rust_dsp_utils::utils::chaos;
+
 use std::f32::consts;
 
 /// hann window function
@@ -68,56 +70,63 @@ pub fn win_flat(x: Complex<f32>, i: usize, l_div: f32) -> Complex<f32> {
     return x * win;
 }
 
-/// random float [0, 1)
-/// - rng: provide random number engine Xoshiro256Plus
-pub fn randf(rng: &mut Xoshiro256Plus) -> f32 {
-    return rng.next_u64() as f32 / u64::MAX as f32;
+// === Utility macros for freezing =============================================
+// all macros follow this syntax:
+// macro!(some_value => new_variable_name)
+// or:
+// macro!(existing_variable <= assigned_value)
+
+/// declares variables mut r, mut phi, r_z1, phi_z1 as the polar representations
+/// of bins[idx] and prev[idx] respectively
+macro_rules! bins_unpack {
+    ($bins:ident, $prev:ident, $idx:ident => $r:ident, $phi:ident, $r_z1:ident, $phi_z1:ident) => {
+        // input bins
+        let (mut $r, mut $phi) = $bins[$idx].to_polar();
+        // previous output bins
+        let ($r_z1, $phi_z1) = $prev[$idx].to_polar();
+    };
+}
+
+/// converts polar representation to cartesian and saves into buffers bins and prev
+macro_rules! bins_pack {
+    ($bins:ident, $prev:ident, $idx:ident <= $r:ident, $phi:ident, $r_z1:ident, $phi_z1:ident) => {
+        $bins[$idx] = Complex::from_polar($r, $phi);
+        // update previous output bins
+        $prev[$idx] = $bins[$idx];
+    };
+}
+
+/// produces a random angle from [-pi to pi]*amount and places it in dest
+macro_rules! rand_theta {
+    ($rng:ident, $amount:ident => $dest:ident) => {
+        let $dest = (chaos::randf($rng) - 0.5)*$amount*std::f32::consts::TAU;
+    };
 }
 
 // === Freeze modes ============================================================
 /// normal freeze
-pub fn flat_freeze(     // TODO: major refactor: make all these methods mono for DRY
+pub fn flat_freeze(
     size: usize,
-    l_bins: &mut Vec<Complex<f32>>,
-    r_bins: &mut Vec<Complex<f32>>,
-    l_prev: &mut Vec<Complex<f32>>,
-    r_prev: &mut Vec<Complex<f32>>,
+    bins: &mut Vec<Complex<f32>>,
+    prev: &mut Vec<Complex<f32>>,
     amount: f32,
     diffuse: f32,
     rng: &mut Xoshiro256Plus,
 ) {
     for i in 0..size {
         // convert bins to polar
-        // input bins
-        let (mut l_r, mut l_phi) = l_bins[i].to_polar();
-        let (mut r_r, mut r_phi) = r_bins[i].to_polar();
-        // previous output bins
-        let (l_r_z1, l_phi_z1) = l_prev[i].to_polar();
-        let (r_r_z1, r_phi_z1) = r_prev[i].to_polar();
-
-        // amplitude freezing
-        l_r *= 1.0 - amount;
-        r_r *= 1.0 - amount;
-        l_r += l_r_z1 * amount;
-        r_r += r_r_z1 * amount;
+        bins_unpack!(bins, prev, i => r, phi, r_z1, phi_z1);
 
         // generate random phase offsets
-        let rand_aux_1 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
-        let rand_aux_2 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
+        rand_theta!(rng, diffuse => rand_aux);
 
-        // phase freeze
-        l_phi *= 1.0 - amount;
-        r_phi *= 1.0 - amount;
-        l_phi += l_phi_z1 * amount + rand_aux_1 * amount;
-        r_phi += r_phi_z1 * amount + rand_aux_2 * amount;
+        // freezing amplitude and phase by crossfading with previous output
+        r = r*(1.0 - amount) + r_z1*amount;
+        // freeze and apply phase randomization to phase
+        phi = phi*(1.0 - amount) + (phi_z1 + rand_aux)*amount;
 
         // save result
-        l_bins[i] = Complex::from_polar(l_r, l_phi);
-        r_bins[i] = Complex::from_polar(r_r, r_phi);
-
-        // update previous output bins
-        l_prev[i] = l_bins[i];
-        r_prev[i] = r_bins[i];
+        bins_pack!(bins, prev, i <= r, phi, r_z1, phi_z1);
     }
 }
 
@@ -125,50 +134,26 @@ pub fn flat_freeze(     // TODO: major refactor: make all these methods mono for
 /// chanche of a single bin to freeze from one frame to the next
 pub fn glitch_freeze(
     size: usize,
-    l_bins: &mut Vec<Complex<f32>>,
-    r_bins: &mut Vec<Complex<f32>>,
-    l_prev: &mut Vec<Complex<f32>>,
-    r_prev: &mut Vec<Complex<f32>>,
+    bins: &mut Vec<Complex<f32>>,
+    prev: &mut Vec<Complex<f32>>,
     amount: f32,
     diffuse: f32,
     rng: &mut Xoshiro256Plus,
 ) {
     for i in 0..size {
         // convert bins to polar
-        // input bins
-        let (mut l_r, mut l_phi) = l_bins[i].to_polar();
-        let (mut r_r, mut r_phi) = r_bins[i].to_polar();
-        // previous output bins
-        let (l_r_z1, l_phi_z1) = l_prev[i].to_polar();
-        let (r_r_z1, r_phi_z1) = r_prev[i].to_polar();
-
-        // amplitude freezing
-        if randf(rng) < amount {
-            l_r = l_r_z1;
-        }
-        if randf(rng) < amount {
-            r_r = r_r_z1;
-        }
+        bins_unpack!(bins, prev, i => r, phi, r_z1, phi_z1);
 
         // generate random phase offsets
-        let rand_aux_1 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
-        let rand_aux_2 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
+        rand_theta!(rng, diffuse => rand_aux);
 
+        // amplitude freezing
+        if chaos::randf(rng) < amount { r = r_z1; }
         // phase freeze
-        if randf(rng) < amount {
-            l_phi = l_phi_z1 + rand_aux_1;
-        }
-        if randf(rng) < amount {
-            r_phi = r_phi_z1 + rand_aux_2;
-        }
+        if chaos::randf(rng) < amount { phi = phi_z1 + rand_aux; }
 
         // save result
-        l_bins[i] = Complex::from_polar(l_r, l_phi);
-        r_bins[i] = Complex::from_polar(r_r, r_phi);
-
-        // update previous output bins
-        l_prev[i] = l_bins[i];
-        r_prev[i] = r_bins[i];
+        bins_pack!(bins, prev, i <= r, phi, r_z1, phi_z1);
     }
 }
 
@@ -176,52 +161,27 @@ pub fn glitch_freeze(
 /// chance of entire frame to freeze from one frame to the next
 pub fn random_freeze(
     size: usize,
-    l_bins: &mut Vec<Complex<f32>>,
-    r_bins: &mut Vec<Complex<f32>>,
-    l_prev: &mut Vec<Complex<f32>>,
-    r_prev: &mut Vec<Complex<f32>>,
+    bins: &mut Vec<Complex<f32>>,
+    prev: &mut Vec<Complex<f32>>,
     amount: f32,
     diffuse: f32,
     rng: &mut Xoshiro256Plus,
 ) {
-    let choice_1 = randf(rng) < amount;
-    let choice_2 = randf(rng) < amount;
+    let choice = chaos::randf(rng) < amount;
     for i in 0..size {
         // convert bins to polar
-        // input bins
-        let (mut l_r, mut l_phi) = l_bins[i].to_polar();
-        let (mut r_r, mut r_phi) = r_bins[i].to_polar();
-        // previous output bins
-        let (l_r_z1, l_phi_z1) = l_prev[i].to_polar();
-        let (r_r_z1, r_phi_z1) = r_prev[i].to_polar();
+        bins_unpack!(bins, prev, i => r, phi, r_z1, phi_z1);
+
+        // generate random phase offsetss
+        rand_theta!(rng, diffuse => rand_aux);
 
         // amplitude freezing
-        if choice_1 {
-            l_r = l_r_z1;
-        }
-        if choice_2 {
-            r_r = r_r_z1;
-        }
-
-        // generate random phase offsets
-        let rand_aux_1 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
-        let rand_aux_2 = (randf(rng) - 0.5) * diffuse * std::f32::consts::TAU;
-
+        if choice { r = r_z1; }
         // phase freeze
-        if choice_1 {
-            l_phi = l_phi_z1 + rand_aux_1;
-        }
-        if choice_2 {
-            r_phi = r_phi_z1 + rand_aux_2;
-        }
+        if choice { phi = phi_z1 + rand_aux; }
 
         // save result
-        l_bins[i] = Complex::from_polar(l_r, l_phi);
-        r_bins[i] = Complex::from_polar(r_r, r_phi);
-
-        // update previous output bins
-        l_prev[i] = l_bins[i];
-        r_prev[i] = r_bins[i];
+        bins_pack!(bins, prev, i <= r, phi, r_z1, phi_z1);
     }
 }
 
@@ -231,10 +191,8 @@ pub fn random_freeze(
 /// on relative loudness
 pub fn reso_freeze(
     size: usize,
-    l_bins: &mut Vec<Complex<f32>>,
-    r_bins: &mut Vec<Complex<f32>>,
-    l_prev: &mut Vec<Complex<f32>>,
-    r_prev: &mut Vec<Complex<f32>>,
+    bins: &mut Vec<Complex<f32>>,
+    prev: &mut Vec<Complex<f32>>,
     amount: f32,
     diffuse: f32,
     rng: &mut Xoshiro256Plus,
@@ -244,21 +202,10 @@ pub fn reso_freeze(
     let mut min: f32 = f32::MAX;
     for i in 0..size {
         // previous output bins to polar
-        let (l_r_z1, _) = l_prev[i].to_polar();
-        let (r_r_z1, _) = r_prev[i].to_polar();
+        let (r_z1, _) = prev[i].to_polar();
 
-        if l_r_z1 > max {
-            max = l_r_z1;
-        }
-        if r_r_z1 > max {
-            max = r_r_z1;
-        }
-        if l_r_z1 < min {
-            min = l_r_z1;
-        }
-        if r_r_z1 < min {
-            min = r_r_z1;
-        }
+        if r_z1 > max { max = r_z1; }
+        if r_z1 < min { min = r_z1; }
 
         // post-condition: min <= max
         // debug_assert!(min <= max);
@@ -267,40 +214,23 @@ pub fn reso_freeze(
     // apply freeze
     for i in 0..size {
         // convert bins to polar
-        // input bins
-        let (mut l_r, mut l_phi) = l_bins[i].to_polar();
-        let (mut r_r, mut r_phi) = r_bins[i].to_polar();
-        // previous output bins
-        let (l_r_z1, l_phi_z1) = l_prev[i].to_polar();
-        let (r_r_z1, r_phi_z1) = r_prev[i].to_polar();
-
-        // scale amount based on relative loudness
-        let l_amount = loud_scale(amount, map_normal(l_r_z1, min, max));
-        let r_amount = loud_scale(amount, map_normal(r_r_z1, min, max));
-
-        // amplitude freezing
-        l_r *= 1.0 - l_amount;
-        r_r *= 1.0 - r_amount;
-        l_r += l_r_z1*l_amount;
-        r_r += r_r_z1*r_amount;
+        bins_unpack!(bins, prev, i => r, phi, r_z1, phi_z1);
 
         // generate random phase offsets
-        let rand_aux_1 = (randf(rng) - 0.5)*diffuse*std::f32::consts::TAU;
-        let rand_aux_2 = (randf(rng) - 0.5)*diffuse*std::f32::consts::TAU;
+        rand_theta!(rng, diffuse => rand_aux);
 
+        // scale amount based on relative loudness
+        let amount = loud_scale(amount, map_normal(r_z1, min, max));
+
+        // amplitude freezing
+        r *= 1.0 - amount;
+        r += r_z1*amount;
         // phase freeze
-        l_phi *= 1.0 - l_amount;
-        r_phi *= 1.0 - r_amount;
-        l_phi += l_phi_z1*l_amount + rand_aux_1*l_amount;
-        r_phi += r_phi_z1*r_amount + rand_aux_2*r_amount;
+        phi *= 1.0 - amount;
+        phi += phi_z1*amount + rand_aux*amount;
 
         // save result
-        l_bins[i] = Complex::from_polar(l_r, l_phi);
-        r_bins[i] = Complex::from_polar(r_r, r_phi);
-
-        // update previous output bins
-        l_prev[i] = l_bins[i];
-        r_prev[i] = r_bins[i];
+        bins_pack!(bins, prev, i <= r, phi, r_z1, phi_z1);
     }
 }
 

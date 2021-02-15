@@ -10,6 +10,7 @@ edition = "2018"
 rustfft = "4.0.0"
 vst = "0.2.1"
 rand_xoshiro = "0.4.0"
+rust_dsp_utils = {git = "https://github.com/Flux-Audio/rust-dsp-utils", branch="main"}
 
 [lib]
 name = "FFT_FREEZE_v0_2_0_dev"

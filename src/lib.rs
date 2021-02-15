@@ -233,6 +233,27 @@ impl Plugin for Effect {
                 freeze = (freeze + self.env_z1 * env_amt).clamp(0.0, 1.0);
 
                 // === spectral freeze =========================================
+
+                // TODO: remove this, when all modes are mono
+                compute::flat_freeze(
+                    SIZE,
+                    &mut xl_bins,
+                    &mut self.yl_bins_z1,
+                    freeze,
+                    diffuse,
+                    &mut self.rng,
+                );
+
+                compute::flat_freeze(
+                    SIZE,
+                    &mut xr_bins,
+                    &mut self.yr_bins_z1,
+                    freeze,
+                    diffuse,
+                    &mut self.rng,
+                );
+
+                /* TODO: change this to mono
                 match freeze_mode {
                     0 => {
                         compute::flat_freeze(
@@ -283,7 +304,7 @@ impl Plugin for Effect {
                         );
                     }
                     _ => {}
-                }
+                }*/
 
                 // === inverse FFT =============================================
                 // inverse fft
