@@ -16,6 +16,9 @@ use rustfft::num_complex::Complex;
 use rustfft::num_traits::Zero;
 use rustfft::FFT;
 
+use rust_dsp_utils::fft::windows;
+use rust_dsp_utils::utils::chaos;
+
 mod compute;
 
 const SIZE: usize = 4096; // must be of the form 2^k >= 32
@@ -155,7 +158,7 @@ impl Plugin for Effect {
             let env_amt = self.params.env_amt.get() * 4.0 - 2.0;
             let env_time = self.params.env_time.get().sqrt();
             let window_mode = (self.params.window_mode.get() * 3.0).round() as u16;
-            let freeze_mode = (self.params.freeze_mode.get() * 6.0).round() as u16;
+            let freeze_mode = (self.params.freeze_mode.get() * 5.0).round() as u16;
 
             // === buffering inputs ============================================
             // rotate buffer, pushing new samples and discarding front
@@ -186,20 +189,20 @@ impl Plugin for Effect {
                 for i in 0..SIZE {
                     match window_mode {
                         0 => {
-                            xl_fft[i] = compute::win_hann(xl_fft[i], i, L_DIV);
-                            xr_fft[i] = compute::win_hann(xr_fft[i], i, L_DIV);
+                            xl_fft[i] = windows::win_hann(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = windows::win_hann(xr_fft[i], i, L_DIV);
                         }
                         1 => {
-                            xl_fft[i] = compute::win_tri(xl_fft[i], i, L_DIV);
-                            xr_fft[i] = compute::win_tri(xr_fft[i], i, L_DIV);
+                            xl_fft[i] = windows::win_tri(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = windows::win_tri(xr_fft[i], i, L_DIV);
                         }
                         2 => {
-                            xl_fft[i] = compute::win_black(xl_fft[i], i, L_DIV);
-                            xr_fft[i] = compute::win_black(xr_fft[i], i, L_DIV);
+                            xl_fft[i] = windows::win_black(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = windows::win_black(xr_fft[i], i, L_DIV);
                         }
                         3 => {
-                            xl_fft[i] = compute::win_flat(xl_fft[i], i, L_DIV);
-                            xr_fft[i] = compute::win_flat(xr_fft[i], i, L_DIV);
+                            xl_fft[i] = windows::win_flat(xl_fft[i], i, L_DIV);
+                            xr_fft[i] = windows::win_flat(xr_fft[i], i, L_DIV);
                         }
                         _ => {}
                     }
@@ -233,78 +236,33 @@ impl Plugin for Effect {
                 freeze = (freeze + self.env_z1 * env_amt).clamp(0.0, 1.0);
 
                 // === spectral freeze =========================================
-
-                // TODO: remove this, when all modes are mono
-                compute::flat_freeze(
-                    SIZE,
-                    &mut xl_bins,
-                    &mut self.yl_bins_z1,
-                    freeze,
-                    diffuse,
-                    &mut self.rng,
-                );
-
-                compute::flat_freeze(
-                    SIZE,
-                    &mut xr_bins,
-                    &mut self.yr_bins_z1,
-                    freeze,
-                    diffuse,
-                    &mut self.rng,
-                );
-
-                /* TODO: change this to mono
                 match freeze_mode {
                     0 => {
-                        compute::flat_freeze(
-                            SIZE,
-                            &mut xl_bins,
-                            &mut xr_bins,
-                            &mut self.yl_bins_z1,
-                            &mut self.yr_bins_z1,
-                            freeze,
-                            diffuse,
-                            &mut self.rng,
-                        );
+                        compute::flat_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::flat_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
                     }
                     1 => {
-                        compute::glitch_freeze(
-                            SIZE,
-                            &mut xl_bins,
-                            &mut xr_bins,
-                            &mut self.yl_bins_z1,
-                            &mut self.yr_bins_z1,
-                            freeze,
-                            diffuse,
-                            &mut self.rng,
-                        );
+                        compute::glitch_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::glitch_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
                     }
                     2 => {
-                        compute::random_freeze(
-                            SIZE,
-                            &mut xl_bins,
-                            &mut xr_bins,
-                            &mut self.yl_bins_z1,
-                            &mut self.yr_bins_z1,
-                            freeze,
-                            diffuse,
-                            &mut self.rng,
-                        );
+                        compute::random_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::random_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
                     }
                     3 => {
-                        compute::reso_freeze(
-                            SIZE,
-                            &mut xl_bins,
-                            &mut xr_bins,
-                            &mut self.yl_bins_z1,
-                            &mut self.yr_bins_z1,
-                            freeze,
-                            diffuse,
-                            &mut self.rng,
-                        );
+                        compute::reso_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::reso_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
+                    }
+                    4 => {
+                        compute::spooky_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::spooky_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
+                    }
+                    5 => {
+                        compute::mashup_freeze(SIZE, &mut xl_bins, &mut self.yl_bins_z1, freeze, diffuse, &mut self.rng);
+                        compute::mashup_freeze(SIZE, &mut xr_bins, &mut self.yr_bins_z1, freeze, diffuse, &mut self.rng);
                     }
                     _ => {}
-                }*/
+                }
 
                 // === inverse FFT =============================================
                 // inverse fft
@@ -317,20 +275,20 @@ impl Plugin for Effect {
                 for i in 0..SIZE {
                     match window_mode {
                         0 => {
-                            xl_samp_i[i] = compute::win_hann(xl_samp_i[i], i, L_DIV);
-                            xr_samp_i[i] = compute::win_hann(xr_samp_i[i], i, L_DIV);
+                            xl_samp_i[i] = windows::win_hann(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = windows::win_hann(xr_samp_i[i], i, L_DIV);
                         }
                         1 => {
-                            xl_samp_i[i] = compute::win_tri(xl_samp_i[i], i, L_DIV);
-                            xr_samp_i[i] = compute::win_tri(xr_samp_i[i], i, L_DIV);
+                            xl_samp_i[i] = windows::win_tri(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = windows::win_tri(xr_samp_i[i], i, L_DIV);
                         }
                         2 => {
-                            xl_samp_i[i] = compute::win_black(xl_samp_i[i], i, L_DIV);
-                            xr_samp_i[i] = compute::win_black(xr_samp_i[i], i, L_DIV);
+                            xl_samp_i[i] = windows::win_black(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = windows::win_black(xr_samp_i[i], i, L_DIV);
                         }
                         3 => {
-                            xl_samp_i[i] = compute::win_flat(xl_samp_i[i], i, L_DIV);
-                            xr_samp_i[i] = compute::win_flat(xr_samp_i[i], i, L_DIV);
+                            xl_samp_i[i] = windows::win_flat(xl_samp_i[i], i, L_DIV);
+                            xr_samp_i[i] = windows::win_flat(xr_samp_i[i], i, L_DIV);
                         }
                         _ => {}
                     }
@@ -404,14 +362,13 @@ impl PluginParameters for EffectParameters {
                     3 => "Flutter",
                     _ => "",
                 }.to_string(),
-            5 => match (self.freeze_mode.get() * 6.0).round() as u16 {
+            5 => match (self.freeze_mode.get() * 5.0).round() as u16 {
                     0 => "Normal",
                     1 => "Glitchy",
                     2 => "Random",
                     3 => "Resonant",
-                    4 => "Fuzzy",
-                    5 => "Dull",
-                    6 => "Mashup",
+                    4 => "Spooky",
+                    5 => "Mashup",
                     _ => "",
                 }.to_string(),
             _ => "".to_string(),
