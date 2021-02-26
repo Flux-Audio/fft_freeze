@@ -1,6 +1,9 @@
 #[macro_use]
 extern crate vst;
 
+#[macro_use]
+extern crate rust_dsp_utils;
+
 use vst::buffer::AudioBuffer;
 use vst::plugin::{Category, Info, Plugin, PluginParameters};
 use vst::util::AtomicFloat;
@@ -18,13 +21,103 @@ use rustfft::FFT;
 
 use rust_dsp_utils::fft::windows;
 use rust_dsp_utils::utils::chaos;
+use rust_dsp_utils::vst_utils;
 
 mod compute;
+
+
+// === GLOBALS =================================================================
 
 const SIZE: usize = 4096; // must be of the form 2^k >= 32
 const L_DIV: f32 = 1.0 / (SIZE as f32);
 const OVERLAP: usize = 4; // what proportion of the fft is overlapped (i.e. 4 -> 3/4)
 const _NORM: f32 = 2.0 / 3.0;
+
+
+// === PARAMETERS ==============================================================
+
+struct_params!(
+    window_mode,
+    freeze_mode,
+    freeze,
+    diffuse,
+    env_amt,
+    env_time
+);
+
+impl PluginParameters for EffectParameters {
+    // the `get_parameter` function reads the value of a parameter.
+    fn get_parameter(&self, index: i32) -> f32 {
+        match index {
+            0 => self.freeze.get(),
+            1 => self.diffuse.get(),
+            2 => self.env_amt.get(),
+            3 => self.env_time.get(),
+            4 => self.window_mode.get(),
+            5 => self.freeze_mode.get(),
+            _ => 0.0,
+        }
+    }
+
+    // the `set_parameter` function sets the value of a parameter.
+    fn set_parameter(&self, index: i32, val: f32) {
+        #[allow(clippy::single_match)]
+        match index {
+            0 => self.freeze.set(val),
+            1 => self.diffuse.set(val),
+            2 => self.env_amt.set(val),
+            3 => self.env_time.set(val),
+            4 => self.window_mode.set(val),
+            5 => self.freeze_mode.set(val),
+            _ => (),
+        }
+    }
+    
+    // This is what will display underneath our control.  We can
+    // format it into a string that makes the most since.
+    fn get_parameter_text(&self, index: i32) -> String {
+        match index {
+            0 => format!("{:.2}", self.freeze.get()),
+            1 => format!("{:.2}", self.diffuse.get()),
+            2 => format!("{:.2}", self.env_amt.get() * 4.0 - 2.0),
+            3 => format!("{:.2}", self.env_time.get()),
+            4 => match (self.window_mode.get() * 3.0).round() as u16 {
+                    0 => "Balanced",
+                    1 => "Smear",
+                    2 => "Clean",
+                    3 => "Flutter",
+                    _ => "",
+                }.to_string(),
+            5 => match (self.freeze_mode.get() * 5.0).round() as u16 {
+                    0 => "Normal",
+                    1 => "Glitchy",
+                    2 => "Random",
+                    3 => "Resonant",
+                    4 => "Spooky",
+                    5 => "Mashup",
+                    _ => "",
+                }.to_string(),
+            _ => "".to_string(),
+        }
+    }
+
+    // This shows the control's name.
+    fn get_parameter_name(&self, index: i32) -> String {
+        match index {
+            0 => "freeze",
+            1 => "diffuse",
+            2 => "envelope amount",
+            3 => "envelope time",
+            4 => "window mode",
+            5 => "freeze mode",
+            _ => "",
+        }
+        .to_string()
+    }
+}
+
+
+// === PLUGIN ==================================================================
 
 struct Effect {
     // Store a handle to the plugin's parameter object.
@@ -59,15 +152,6 @@ struct Effect {
     yr_samp: VecDeque<f32>,
 }
 
-struct EffectParameters {
-    window_mode: AtomicFloat,
-    freeze_mode: AtomicFloat,
-    freeze: AtomicFloat,
-    diffuse: AtomicFloat,
-    env_amt: AtomicFloat,
-    env_time: AtomicFloat,
-}
-
 impl Default for Effect {
     fn default() -> Effect {
         Effect {
@@ -97,19 +181,6 @@ impl Default for Effect {
     }
 }
 
-impl Default for EffectParameters {
-    fn default() -> EffectParameters {
-        EffectParameters {
-            window_mode: AtomicFloat::new(0.0),
-            freeze_mode: AtomicFloat::new(0.0),
-            freeze: AtomicFloat::new(0.0),
-            diffuse: AtomicFloat::new(0.0),
-            env_amt: AtomicFloat::new(0.5),
-            env_time: AtomicFloat::new(0.0),
-        }
-    }
-}
-
 // All plugins using `vst` also need to implement the `Plugin` trait.  Here, we
 // define functions that give necessary info to our host.
 impl Plugin for Effect {
@@ -118,7 +189,7 @@ impl Plugin for Effect {
             name: "FFT_FREEZE".to_string(),
             vendor: "Flux-Audio".to_string(),
             unique_id: 72763875,
-            version: 020,
+            version: 20,
             inputs: 2,
             outputs: 2,
             // This `parameters` bit is important; without it, none of our
@@ -136,7 +207,10 @@ impl Plugin for Effect {
     }
 
     // called once
-    fn init(&mut self) {}
+    fn init(&mut self) {
+        // set default parameters
+        self.params.env_amt.set(0.5);
+    }
 
     // Here is where the bulk of our audio processing code goes.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
@@ -316,77 +390,6 @@ impl Plugin for Effect {
     // plugin has no parameters.
     fn get_parameter_object(&mut self) -> Arc<dyn PluginParameters> {
         Arc::clone(&self.params) as Arc<dyn PluginParameters>
-    }
-}
-
-impl PluginParameters for EffectParameters {
-    // the `get_parameter` function reads the value of a parameter.
-    fn get_parameter(&self, index: i32) -> f32 {
-        match index {
-            0 => self.freeze.get(),
-            1 => self.diffuse.get(),
-            2 => self.env_amt.get(),
-            3 => self.env_time.get(),
-            4 => self.window_mode.get(),
-            5 => self.freeze_mode.get(),
-            _ => 0.0,
-        }
-    }
-
-    // the `set_parameter` function sets the value of a parameter.
-    fn set_parameter(&self, index: i32, val: f32) {
-        #[allow(clippy::single_match)]
-        match index {
-            0 => self.freeze.set(val),
-            1 => self.diffuse.set(val),
-            2 => self.env_amt.set(val),
-            3 => self.env_time.set(val),
-            4 => self.window_mode.set(val),
-            5 => self.freeze_mode.set(val),
-            _ => (),
-        }
-    }
-
-    // This is what will display underneath our control.  We can
-    // format it into a string that makes the most since.
-    fn get_parameter_text(&self, index: i32) -> String {
-        match index {
-            0 => format!("{:.2}", self.freeze.get()),
-            1 => format!("{:.2}", self.diffuse.get()),
-            2 => format!("{:.2}", self.env_amt.get() * 4.0 - 2.0),
-            3 => format!("{:.2}", self.env_time.get()),
-            4 => match (self.window_mode.get() * 3.0).round() as u16 {
-                    0 => "Balanced",
-                    1 => "Smear",
-                    2 => "Clean",
-                    3 => "Flutter",
-                    _ => "",
-                }.to_string(),
-            5 => match (self.freeze_mode.get() * 5.0).round() as u16 {
-                    0 => "Normal",
-                    1 => "Glitchy",
-                    2 => "Random",
-                    3 => "Resonant",
-                    4 => "Spooky",
-                    5 => "Mashup",
-                    _ => "",
-                }.to_string(),
-            _ => "".to_string(),
-        }
-    }
-
-    // This shows the control's name.
-    fn get_parameter_name(&self, index: i32) -> String {
-        match index {
-            0 => "freeze",
-            1 => "diffuse",
-            2 => "envelope amount",
-            3 => "envelope time",
-            4 => "window mode",
-            5 => "freeze mode",
-            _ => "",
-        }
-        .to_string()
     }
 }
 
